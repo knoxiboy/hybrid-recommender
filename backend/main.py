@@ -7,6 +7,8 @@ import sys
 import io
 import time
 import logging
+from collections import Counter
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -31,7 +33,7 @@ from data_adapter import adapt_data, read_file
 from nlp_engine import batch_analyze, aggregate_sentiment_by_item
 from content_model import ContentRecommender
 from collaborative_model import CollaborativeRecommender
-from hybrid_model import HybridRecommender
+from hybrid_model import HybridRecommender, bayesian_rating
 
 # ── App ──────────────────────────────────────────────────────────────
 app = FastAPI(title="Hybrid Recommender API", version="3.0")
@@ -91,7 +93,11 @@ models = {
     "ready": False,
     "item_df": None,
     "build_time": None,
+    "last_trained_at": None,
 }
+
+trending_cache = {}
+TRENDING_CACHE_TTL = 60 * 60  # 1 hour
 
 
 class WeightsUpdate(BaseModel):
@@ -130,6 +136,108 @@ def status():
         "product_count": product_count,
         "model_ready": models["ready"],
         "build_time": models["build_time"],
+    }
+
+
+# ── Dashboard (admin metrics — issue #71) ───────────────────────────
+
+@app.get("/api/dashboard")
+def dashboard():
+    """Aggregate metrics for the admin dashboard."""
+    sb = get_supabase()
+
+    try:
+        product_count = sb.table('products').select('id', count='exact').limit(0).execute().count or 0
+    except Exception as e:
+        logger.warning("Dashboard: product count failed: %s", e)
+        product_count = 0
+
+    try:
+        interaction_count = sb.table('purchases').select('id', count='exact').limit(0).execute().count or 0
+    except Exception as e:
+        logger.warning("Dashboard: interaction count failed: %s", e)
+        interaction_count = 0
+
+    # Distinct users from purchases (capped scan)
+    total_users = 0
+    purchase_counts: Counter = Counter()
+    try:
+        purchase_rows = sb.table('purchases') \
+            .select('user_id, product_id') \
+            .limit(50000).execute().data or []
+        total_users = len({r['user_id'] for r in purchase_rows if r.get('user_id')})
+        purchase_counts = Counter(
+            r['product_id'] for r in purchase_rows if r.get('product_id') is not None
+        )
+    except Exception as e:
+        logger.warning("Dashboard: purchases scan failed: %s", e)
+
+    # Averages over products
+    avg_recommendation_score = 0.0
+    avg_sentiment_score = 0.0
+    try:
+        prod_stats = sb.table('products') \
+            .select('rating, avg_sentiment') \
+            .limit(50000).execute().data or []
+        ratings = [
+            float(p['rating']) for p in prod_stats
+            if p.get('rating') not in (None, 0)
+        ]
+        sentiments = [
+            float(p['avg_sentiment']) for p in prod_stats
+            if p.get('avg_sentiment') is not None
+        ]
+        if ratings:
+            avg_recommendation_score = round(sum(ratings) / len(ratings), 4)
+        if sentiments:
+            avg_sentiment_score = round(sum(sentiments) / len(sentiments), 4)
+    except Exception as e:
+        logger.warning("Dashboard: averages query failed: %s", e)
+
+    # Top 5 by purchase count; fallback to top-rated when no purchases
+    top_products = []
+    try:
+        if purchase_counts:
+            top_ids = [pid for pid, _ in purchase_counts.most_common(5)]
+            prod_result = sb.table('products') \
+                .select('id, title, category, rating') \
+                .in_('id', top_ids).execute().data or []
+            prod_map = {p['id']: p for p in prod_result}
+            for pid in top_ids:
+                p = prod_map.get(pid)
+                if p:
+                    top_products.append({
+                        'id': p['id'],
+                        'title': p.get('title', ''),
+                        'category': p.get('category', ''),
+                        'rating': round(float(p.get('rating', 0) or 0), 2),
+                        'interactions': purchase_counts[pid],
+                    })
+        if not top_products:
+            fallback = sb.table('products') \
+                .select('id, title, category, rating') \
+                .order('rating', desc=True) \
+                .order('review_count', desc=True) \
+                .limit(5).execute().data or []
+            for p in fallback:
+                top_products.append({
+                    'id': p['id'],
+                    'title': p.get('title', ''),
+                    'category': p.get('category', ''),
+                    'rating': round(float(p.get('rating', 0) or 0), 2),
+                    'interactions': 0,
+                })
+    except Exception as e:
+        logger.warning("Dashboard: top products query failed: %s", e)
+
+    return {
+        "total_products": product_count,
+        "total_users": total_users,
+        "total_interactions": interaction_count,
+        "avg_recommendation_score": avg_recommendation_score,
+        "avg_sentiment_score": avg_sentiment_score,
+        "top_5_recommended_products": top_products,
+        "model_last_trained": models.get("last_trained_at"),
     }
 
 
@@ -370,6 +478,7 @@ def build_models():
     models["item_df"] = item_df
     models["ready"] = True
     models["build_time"] = build_time
+    models["last_trained_at"] = datetime.now(timezone.utc).isoformat()
 
     logger.info(
         "Built recommendation models for %d items in %.2f seconds",
@@ -400,6 +509,77 @@ def get_recommendations(item_title: str, top_n: int = 10, explain: bool = Query(
         "recommendations": recs,
         "weights": models["hybrid"].get_weights(),
         "explain": explain,
+    }
+
+
+@app.get("/api/explain")
+def explain_recommendation(item: str, user: str):
+    """Explain WHY an item was recommended to a specific user."""
+    if not models["ready"]:
+        raise HTTPException(400, "Models not built. Build first via /api/build.")
+        
+    hybrid = models["hybrid"]
+    
+    # Check if item exists in our models
+    if item not in hybrid._rating_map:
+        raise HTTPException(404, "Item not found in recommendations database.")
+        
+    # Extract item scores
+    sentiment_score = hybrid._sentiment_map.get(item, 0.0)
+    bayesian_score = hybrid._rating_map.get(item, 0.0)
+    norm_sentiment = (sentiment_score + 1) / 2
+    
+    collab_score = 0.0
+    content_score = 0.0
+    
+    collab_model = models.get("collab")
+    if collab_model:
+        # Predict rating for the user and item
+        pred = collab_model.predict_rating(user, item)
+        if pred is not None:
+            collab_score = max(0.0, min(1.0, pred / 5.0))
+            
+        # For content score, compare against the user's top-rated item
+        user_history = collab_model.df[collab_model.df['user_id'] == user]
+        if not user_history.empty:
+            top_item = user_history.loc[user_history['rating'].idxmax()]['title']
+            content_model = models.get("content")
+            if content_model:
+                try:
+                    recs = content_model.recommend(top_item, top_n=100)
+                    for r in recs:
+                        if r['title'] == item:
+                            content_score = r['content_score']
+                            break
+                except Exception:
+                    pass
+    
+    # Build reasons
+    reasons = []
+    if collab_score > 0.7:
+        reasons.append("Similar to your top rated items")
+    elif collab_score > 0.5:
+        reasons.append("Matches your user profile")
+        
+    if norm_sentiment > 0.65:
+        reasons.append("High sentiment score")
+        
+    if bayesian_score > 4.0:
+        reasons.append("Popular in your category")
+        
+    reasons = reasons[:3]
+    if not reasons:
+        reasons.append("Recommended based on general popularity")
+
+    return {
+        "item": item,
+        "reasons": reasons,
+        "scores": {
+            "content": round(content_score, 4),
+            "collab": round(collab_score, 4),
+            "sentiment": round(norm_sentiment, 4),
+            "bayesian": round(bayesian_score, 4)
+        }
     }
 
 
@@ -452,6 +632,118 @@ def list_items(page: int = 1, per_page: int = 50):
         "page": page,
         "per_page": per_page,
     }
+
+
+# ── Trending ───────────────────────────────────────────────────────
+
+@app.get("/api/trending")
+def get_trending(days: int = Query(7, ge=1, le=30), limit: int = Query(10, ge=1, le=50)):
+    """Return currently trending products based on recent interactions."""
+    cache_key = (days, limit)
+    now_ts = time.time()
+    cached = trending_cache.get(cache_key)
+    if cached and now_ts - cached["ts"] < TRENDING_CACHE_TTL:
+        return cached["data"]
+
+    try:
+        sb = get_supabase_admin()
+    except RuntimeError:
+        sb = get_supabase()
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff_iso = cutoff.isoformat() + 'Z'
+
+    recent_rows = []
+    page_size = 1000
+    start = 0
+    while True:
+        result = sb.table('purchases') \
+            .select('product_id, rating, purchased_at') \
+            .gte('purchased_at', cutoff_iso) \
+            .range(start, start + page_size - 1) \
+            .execute()
+        batch = result.data or []
+        recent_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+
+    if not recent_rows:
+        data = {"results": [], "total": 0, "days": days, "limit": limit}
+        trending_cache[cache_key] = {"ts": now_ts, "data": data}
+        return data
+
+    product_stats = {}
+    for row in recent_rows:
+        pid = row.get('product_id')
+        if pid is None:
+            continue
+        product_stats.setdefault(pid, {
+            'count': 0,
+            'rating_sum': 0.0,
+            'rating_count': 0,
+        })
+        product_stats[pid]['count'] += 1
+        rating = row.get('rating')
+        if isinstance(rating, (int, float)):
+            product_stats[pid]['rating_sum'] += float(rating)
+            product_stats[pid]['rating_count'] += 1
+
+    product_ids = list(product_stats.keys())
+    product_meta = {}
+    if product_ids:
+        meta_result = sb.table('products') \
+            .select('id, title, description, category, rating, avg_sentiment, review_count') \
+            .in_('id', product_ids) \
+            .execute()
+        for p in meta_result.data or []:
+            product_meta[p['id']] = p
+
+    avg_ratings = [
+        stats['rating_sum'] / stats['rating_count']
+        for stats in product_stats.values()
+        if stats['rating_count'] > 0
+    ]
+    global_avg = sum(avg_ratings) / len(avg_ratings) if avg_ratings else 3.0
+
+    max_count = max((stats['count'] for stats in product_stats.values()), default=1)
+
+    results = []
+    for pid, stats in product_stats.items():
+        meta = product_meta.get(pid, {})
+        avg_rating = (
+            stats['rating_sum'] / stats['rating_count']
+            if stats['rating_count'] > 0 else 0.0
+        )
+        bayes = bayesian_rating(avg_rating, stats['count'], global_avg=global_avg)
+        popularity_norm = stats['count'] / max_count if max_count else 0.0
+        trending_score = 0.7 * (bayes / 5.0) + 0.3 * popularity_norm
+
+        results.append({
+            'id': pid,
+            'title': meta.get('title') or f'Product {pid}',
+            'description': str(meta.get('description', ''))[:180],
+            'category': meta.get('category', ''),
+            'rating': round(avg_rating, 2),
+            'bayesian_rating': round(bayes, 2),
+            'interaction_count': stats['count'],
+            'avg_sentiment': meta.get('avg_sentiment', 0.0),
+            'product_rating': round(float(meta.get('rating', 0.0)), 2),
+            'review_count': meta.get('review_count', 0),
+            'trending_score': round(trending_score, 4),
+        })
+
+    results.sort(key=lambda item: item['trending_score'], reverse=True)
+    results = results[:limit]
+
+    data = {
+        'results': results,
+        'total': len(results),
+        'days': days,
+        'limit': limit,
+    }
+    trending_cache[cache_key] = {"ts": now_ts, "data": data}
+    return data
 
 
 # ── Categories ──────────────────────────────────────────────────────
@@ -508,3 +800,7 @@ if os.path.isdir(frontend_dir):
     @app.get("/")
     def serve_frontend():
         return FileResponse(os.path.join(frontend_dir, "index.html"))
+
+    @app.get("/dashboard.html")
+    def serve_dashboard():
+        return FileResponse(os.path.join(frontend_dir, "dashboard.html"))

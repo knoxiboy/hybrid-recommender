@@ -26,8 +26,7 @@ async function initSupabase() {
 const state = {
     user: null,
     isGuest: true,
-    products: [],
-    page: 1,
+    products: [],    trending: [],    page: 1,
     perPage: 20,
     totalProducts: 0,
     searchTimer: null,
@@ -64,6 +63,8 @@ const els = {
     productGrid: $('product-grid'),
     productsTitle: $('products-title'),
     productCount: $('product-count'),
+    trendingSection: $('trending-section'),
+    trendingGrid: $('trending-grid'),
     skeletonLoader: $('skeleton-loader'),
     loadMoreBtn: $('load-more-btn'),
     loadMoreContainer: $('load-more-container'),
@@ -236,19 +237,21 @@ function toggleAuthMode() {
 // ── Type-to-Search (Global Keyboard Capture) ────────────────────────
 function initTypeToSearch() {
     document.addEventListener('keydown', (e) => {
-        const tag = e.target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        if (e.key === ' ' || e.key === 'Escape' || e.ctrlKey || e.altKey || e.metaKey) return;
+        const activeElement = document.activeElement;
+        const tag = activeElement?.tagName;
 
-        if (e.key === 'Backspace') {
-            els.searchInput.focus();
-            return;
-        }
+        const isTypingField =
+            tag === 'INPUT' ||
+            tag === 'TEXTAREA' ||
+            tag === 'SELECT' ||
+            activeElement?.isContentEditable;
 
-        if (e.key.length === 1) {
-            els.searchInput.focus();
-            // The character will naturally be typed into the input
-        }
+        if (isTypingField) return;
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+        if (e.key !== '/') return;
+
+        e.preventDefault();
+        els.searchInput.focus();
     });
 }
 
@@ -370,6 +373,72 @@ async function loadProducts(append = false) {
         els.skeletonLoader.hidden = true;
         toast('Failed to load products', 'error');
     }
+}
+
+async function loadTrending(days = 7, limit = 10) {
+    els.trendingSection.hidden = true;
+    els.trendingGrid.innerHTML = '';
+
+    try {
+        const data = await API.get(`/api/trending?days=${days}&limit=${limit}`);
+        const items = data.results || [];
+        if (!items.length) {
+            return;
+        }
+
+        state.trending = items;
+        renderTrending(items);
+        els.trendingSection.hidden = false;
+    } catch (err) {
+        console.warn('Trending load failed:', err.message || err);
+    }
+}
+
+function renderTrending(items) {
+    els.trendingGrid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+
+    items.forEach((item, index) => {
+        const card = document.createElement('div');
+        card.className = 'product-card trending-card';
+        card.style.animationDelay = `${index * 35}ms`;
+        card.innerHTML = `
+            <div class="product-card__image">
+                ${categoryIcon(item.category)}
+            </div>
+            <div class="product-card__body">
+                ${item.category ? `<span class="product-card__category">${item.category}</span>` : ''}
+                <h3 class="product-card__title">${item.title || 'Untitled'}</h3>
+                <p class="product-card__desc">${item.description || 'No description available.'}</p>
+                <div class="product-card__footer">
+                    <div class="product-card__rating">
+                        <div class="star-rating">${renderStars(item.rating || 0)}</div>
+                        <span class="rating-value">${(item.rating || 0).toFixed(1)}</span>
+                    </div>
+                    ${sentimentBadge(item.avg_sentiment || 0)}
+                </div>
+            </div>
+            <div class="product-card__actions">
+                <button class="btn--add-cart" data-title="${item.title}">
+                    View Trending
+                </button>
+            </div>
+        `;
+
+        const actionButton = card.querySelector('.btn--add-cart');
+        if (actionButton) {
+            actionButton.addEventListener('click', (e) => {
+                e.stopPropagation();
+                loadRecommendations(item.title);
+                toast(`Showing recommendations for trending product "${item.title.substring(0, 40)}"`, 'info');
+            });
+        }
+
+        card.addEventListener('click', () => loadRecommendations(item.title));
+        fragment.appendChild(card);
+    });
+
+    els.trendingGrid.appendChild(fragment);
 }
 
 async function loadSearchResults(query) {
@@ -527,7 +596,8 @@ async function handleBuild() {
         state.modelReady = true;
         toast(`Models built in ${data.build_time_seconds}s — ${data.items?.toLocaleString()} items`, 'success');
         updateStatus('ready', `Ready — ${data.items?.toLocaleString()} products`);
-        loadProducts();
+        await loadProducts();
+        await loadTrending();
     } catch (err) {
         toast('Build failed: ' + err.message, 'error');
     } finally {
@@ -549,10 +619,12 @@ async function checkStatus() {
         if (data.model_ready) {
             state.modelReady = true;
             updateStatus('ready', `Ready — ${count.toLocaleString()} products`);
-            loadProducts();
+            await loadProducts();
+            await loadTrending();
         } else if (count > 0) {
             updateStatus('has-data', `${count.toLocaleString()} products — Build models to start`);
-            loadProducts();
+            await loadProducts();
+            await loadTrending();
         } else {
             updateStatus('', 'No data — Upload a CSV or JSON dataset');
             els.skeletonLoader.hidden = true;
