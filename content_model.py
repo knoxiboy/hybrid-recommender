@@ -24,41 +24,34 @@ class ContentRecommender:
         self.matrix = self.vectorizer.fit_transform(self.df['combined'].fillna(''))
         # Do not compute full similarity matrix here to avoid OOM
         self._title_to_idx = {
-            t.lower(): i for i, t in enumerate(self.df['title'].astype(str))
-        }
+    t.lower(): i for i, t in enumerate(self.df['title'])
+}
 
     def recommend(self, title, top_n=10):
-
-        title_key = title.lower()
-
-        if title_key not in self._title_to_idx:
+        """
+        Get content-based recommendations for a given item title.
+        Returns list of dicts: [{ 'title', 'content_score' }, ...]
+        """
+        if title.lower() not in self._title_to_idx:
             return []
 
-        idx = self._title_to_idx[title_key]
-
-    
+        idx = self._title_to_idx[title.lower()]
         query_vec = self.matrix[idx]
         scores = cosine_similarity(query_vec, self.matrix).flatten()
-
-        
-        scores[idx] = float("-inf")
-
-        top_indices = np.argsort(-scores)
+        sim_scores = list(enumerate(scores))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
         results = []
-        seen = set() 
-        for i in top_indices+1:
-            t = str(self.df.iloc[i]["title"]).strip()
-            key = t.lower()
-            if key in seen:
+        seen = set()
+        for i, score in sim_scores:
+            t = self.df.iloc[i]['title']
+            if t == title or t in seen:
                 continue
-            seen.add(key)
-            
+            seen.add(t)
             results.append({
-                "title": t,
-                "content_score": float(scores[i])
+                'title': t,
+                'content_score': float(score),
             })
-            
             if len(results) >= top_n:
                 break
 
@@ -97,8 +90,7 @@ class ContentRecommender:
         """
         query_vec = self.vectorizer.transform([query])
         scores = cosine_similarity(query_vec, self.matrix).flatten()
-        top_indices = np.argpartition(-scores, top_n)[:top_n]
-        top_indices = top_indices[np.argsort(-scores[top_indices])]
+        top_indices = scores.argsort()[::-1][:top_n]
 
         results = []
         seen = set()
@@ -110,7 +102,7 @@ class ContentRecommender:
                 continue
             seen.add(t)
             
-            tp = self.df.at[idx, 'top_reviews'] if 'top_reviews' in self.df.columns else []
+            tp = self.df.iloc[idx].get('top_reviews', [])
             top_reviews = tp if isinstance(tp, list) else []
 
             results.append({
