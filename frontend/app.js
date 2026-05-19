@@ -236,19 +236,21 @@ function toggleAuthMode() {
 // ── Type-to-Search (Global Keyboard Capture) ────────────────────────
 function initTypeToSearch() {
     document.addEventListener('keydown', (e) => {
-        const tag = e.target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        if (e.key === ' ' || e.key === 'Escape' || e.ctrlKey || e.altKey || e.metaKey) return;
+        const activeElement = document.activeElement;
+        const tag = activeElement?.tagName;
 
-        if (e.key === 'Backspace') {
-            els.searchInput.focus();
-            return;
-        }
+        const isTypingField =
+            tag === 'INPUT' ||
+            tag === 'TEXTAREA' ||
+            tag === 'SELECT' ||
+            activeElement?.isContentEditable;
 
-        if (e.key.length === 1) {
-            els.searchInput.focus();
-            // The character will naturally be typed into the input
-        }
+        if (isTypingField) return;
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+        if (e.key !== '/') return;
+
+        e.preventDefault();
+        els.searchInput.focus();
     });
 }
 
