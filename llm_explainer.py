@@ -15,7 +15,7 @@ except ImportError:
     genai = None
 
 logger = logging.getLogger(__name__)
-GOOGLE_API_KEY = "AIzaSyDPCx2tX_1L3F4PDjlrJrtZQ30zHwn6fIo"
+GOOGLE_API_KEY = "Your_API_KEY"
 
 class LLMExplainer:
     """Generate natural language explanations for recommendations using LLM."""
@@ -160,7 +160,7 @@ Generate a COMPLETE, FULL explanation (not truncated):"""
     def _generate_fallback_explanation(
         self,
         recommended_item: str,
-        query_item: str,
+        query_item: stra,
         scores: Dict[str, float],
         description: str = "",
         category: str = "",
