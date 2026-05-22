@@ -28,7 +28,7 @@
 
 > A production-ready recommender fusing **Content-Based Filtering (TF-IDF)**, **Collaborative Filtering (SVD)**, and **NLP Sentiment Analysis (VADER)** with a tunable weighted scoring engine — backed by Supabase PostgreSQL, served via FastAPI, and built to be **dataset-agnostic by design**.
 
-```
+```text
 25,000+ products  ·  Sub-50ms search  ·  3 ML models fused  ·  ~60% faster integration
 ```
 
@@ -38,7 +38,7 @@
 
 The core insight: blend three independent signals, each capturing something the others miss.
 
-```
+```text
 User Reviews (text)           ──→  NLP Engine (VADER Sentiment)    ──┐
 Item Metadata (title/desc)    ──→  Content Vectorization (TF-IDF)  ──┼──→  Weighted Hybrid  ──→  Ranked Results
 User Purchases (clicks/buys)  ──→  Matrix Factorization (SVD)      ──┘         Engine
@@ -103,7 +103,7 @@ Review text analyzed for compound polarity ∈ [-1, 1]. Per-item aggregation →
 
 ## 03 — Tech Stack
 
-```
+```text
 ┌─────────────────┬────────────────────────────────────────────────┐
 │ Layer           │ Technology                                      │
 ├─────────────────┼────────────────────────────────────────────────┤
@@ -123,7 +123,7 @@ Review text analyzed for compound polarity ∈ [-1, 1]. Per-item aggregation →
 
 ## 04 — Project Structure
 
-```
+```text
 hybrid-recommender/
 │
 ├── backend/
@@ -173,13 +173,15 @@ cp .env.example .env
 ```env
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_KEY=your-service-role-key   # Required for bulk import
+SUPABASE_SERVICE_KEY=your-service-role-key
 ```
 
 ```bash
 # 3 — Run SQL migrations
 # See SETUP.md for full schema → paste into Supabase SQL Editor
+```
 
+```bash
 # 4 — Start the server
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
@@ -188,32 +190,30 @@ Open **http://localhost:8000**, upload any CSV/JSON from `datasets/`, click **Bu
 
 ## 06 — API Reference
 
+```http
+GET    /api/config
+GET    /api/status
+GET    /api/search?q=...&limit=20
+POST   /api/upload
+POST   /api/build
+GET    /api/recommend/{title}
+GET    /api/items?page=1&per_page=50
+GET    /api/categories
+GET    /api/weights
+PUT    /api/weights
+GET    /api/purchases/{user_id}
+POST   /api/purchases
 ```
-GET    /api/config                   →  Supabase public config
-GET    /api/status                   →  System status + product count
-GET    /api/search?q=...&limit=20    →  Full-text search (PostgreSQL FTS)
-POST   /api/upload                   →  Upload CSV/JSON dataset
-POST   /api/build                    →  Train TF-IDF, SVD, VADER models
-GET    /api/recommend/{title}        →  Hybrid recommendations for an item
-GET    /api/items?page=1&per_page=50 →  Paginated product listing
-GET    /api/categories               →  All available categories
-GET    /api/weights                  →  Current α, β, γ blend weights
-PUT    /api/weights                  →  Update blend weights live
-GET    /api/purchases/{user_id}      →  User purchase history
-POST   /api/purchases                →  Record a purchase event
-```
-
----
 
 ## 07 — Evaluation
 
-```bash
+```python
+# Run evaluation benchmarks
 python evaluation.py
 ```
-
 Benchmarks **Content-Only**, **Collab-Only**, **Sentiment-Only**, and **Hybrid** across:
 
-```
+```text
 Precision@K  —  fraction of relevant items in top-K
 Recall@K     —  fraction of all relevant items retrieved
 NDCG@K       —  ranking quality (discounted cumulative gain)
@@ -223,7 +223,7 @@ NDCG@K       —  ranking quality (discounted cumulative gain)
 
 ## 08 — Security
 
-```
+```text
 ✓  No hardcoded credentials — config served via /api/config
 ✓  .env excluded from git via .gitignore
 ✓  CORS restricted to configured origins
@@ -243,7 +243,7 @@ MIT — see [`LICENSE`](LICENSE)
 
 <div align="center">
 
-```
+```text
 Built by Leona Goel
 B.Tech CSE · Vellore Institute of Technology
 National Finalist · Smart India Hackathon 2025 · Top 8% of 950+ Teams
