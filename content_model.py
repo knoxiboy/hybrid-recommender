@@ -21,6 +21,12 @@ class ContentRecommender:
             max_features=5000,
             ngram_range=(1, 2),
         )
+        if "combined" not in self.df.columns:
+            self.df["combined"] = (
+                self.df.get("title", "").astype(str) + " " +
+                self.df.get("author", "").astype(str) + " " +
+                self.df.get("category", "").astype(str)
+            )
         self.matrix = self.vectorizer.fit_transform(self.df['combined'].fillna(''))
         # Do not compute full similarity matrix here to avoid OOM
         self._title_to_idx = {
