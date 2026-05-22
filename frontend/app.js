@@ -1,3 +1,4 @@
+
 // ===== THEME TOGGLE =====
 const themeToggle = document.getElementById('theme-toggle');
 const root = document.documentElement;
@@ -1363,258 +1364,46 @@ function setupScrollObserver() {
             rootMargin: '0px 0px 200px 0px',
             threshold: 0,
         }
+
     );
+  } catch (err) {
+    console.warn('[app] Config fetch failed — running offline.', err);
+  }
 
-    state.scrollObserver.observe(els.scrollSentinel);
+  // 2. Auth
+  if (supabaseClient) {
+    initAuth(supabaseClient);
+    bindAuthEvents();
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) await signInAsGuest();
+  }
+
+  // 3. UI infrastructure
+  initModalDismiss();
+  startStatusPoller(30_000);
+
+  // 4. Dataset management
+  bindUploadHandler((data) => {
+    setState({ datasetLoaded: true, productCount: data.rows ?? 0 });
+    loadProducts(1);
+    loadCategories();
+  });
+  bindBuildModelsHandler(() => setState({ modelsBuilt: true }));
+
+  // 5. Search & browse
+  initSearch();
+  loadCategories();
+  loadProducts(1);
+
+  // 6. Recommendation weight sliders
+  initWeightSliders();
+
+  // 7. React to state changes
+  subscribe('recentlyViewed', renderRecentlyViewed);
+
+  console.log('[HybridRec] ✓ All modules loaded.');
 }
 
-function destroyScrollObserver() {
-    if (state.scrollObserver) {
-        state.scrollObserver.disconnect();
-        state.scrollObserver = null;
-    }
-}
-
-// ── CSS spin animation ──────────────────────────────────────────────
-const spinStyle = document.createElement('style');
-spinStyle.textContent = `@keyframes spin { to { transform: rotate(360deg); } } .spin { animation: spin 1s linear infinite; }`;
-document.head.appendChild(spinStyle);
-
-// ── Back To Top ─────────────────────────────────────────────────────
-function initBackToTop() {
-    const backToTop = document.getElementById('backToTop');
-
-    if (!backToTop) return;
-
-    
-    backToTop.style.display = 'none';
-
-    window.addEventListener('scroll', () => {
-        backToTop.style.display =
-            window.scrollY > 700 ? 'block' : 'none';
-    });
-
-    backToTop.addEventListener('click', () => {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-    });
-}
-// ── Init ────────────────────────────────────────────────────────────
-setPageMeta(null, 'A hybrid recommender fusing TF-IDF, SVD and VADER sentiment.');
-async function init() {
-    bindEvents();
-    loadPreferences();
-    initTypeToSearch();
-    initBackToTop();
-
-    // Initialize Supabase client from backend config (no hardcoded keys)
-    await initSupabase();
-
-    // Run auth and status independently — neither blocks the other
-    initAuth().catch((e) => console.warn('Auth error:', e));
-    checkStatus().catch((e) => console.warn('Status error:', e));
-}
-
-// Debounce helper
-function debounce(func, delay) {
-  let timeout;
-
-  return function (...args) {
-    clearTimeout(timeout);
-
-    timeout = setTimeout(() => {
-      func.apply(this, args);
-    }, delay);
-  };
-}
-
-function savePreferences() {
-    const prefs = {
-        category: state.filters.category,
-        rating: state.filters.rating,
-        sentiment: state.filters.sentiment
-    };
-    localStorage.setItem('userPreferences', JSON.stringify(prefs));
-}
-
-const debouncedSavePreferences = debounce(savePreferences, 500);
-
-els.categoryFilter.addEventListener('change', (e) => {
-    state.filters.category = e.target.value;
-    renderProducts(state.allProducts, false);
-    debouncedSavePreferences();
-});
-
-els.ratingFilter.addEventListener('change', (e) => {
-    state.filters.rating = e.target.value;
-    renderProducts(state.allProducts, false);
-    debouncedSavePreferences();
-});
-
-els.sentimentFilter.addEventListener('change', (e) => {
-    state.filters.sentiment = e.target.value;
-    renderProducts(state.allProducts, false);
-    debouncedSavePreferences();
-});
-
-els.clearFiltersBtn.addEventListener('click', resetAllFiltersAndSearch);
-
-function resetAllFiltersAndSearch() {
-    els.searchInput.value = '';
-    els.categoryFilter.value = '';
-    els.ratingFilter.value = '';
-    els.sentimentFilter.value = '';
-    
-    state.filters = {
-        category: '',
-        rating: '',
-        sentiment: ''
-    };
-    
-    els.productsTitle.textContent = 'Top Products';
-    
-    debouncedSavePreferences();
-    loadProducts(false);
-    setupScrollObserver();
-}
-
-document.addEventListener('DOMContentLoaded', init);
-async function sendFeedback(item, feedback, button) {
-
-    const storageKey = `feedback_${item}`;
-
-  return function (...args) {
-    clearTimeout(timeout);
-
-    timeout = setTimeout(() => {
-      func.apply(this, args);
-    }, delay);
-  };
-}
-// ── Product Comparison (Side by Side) ──────────────────────────────
-function toggleCompare(product, checked) {
-    if (checked) {
-        if (state.compareList.length >= 3) {
-            toast('Maximum 3 products can be compared', 'error');
-            return false;
-        }
-        if (!state.compareList.find(p => p.title === product.title)) {
-            state.compareList.push(product);
-        }
-    } else {
-        state.compareList = state.compareList.filter(p => p.title !== product.title);
-    }
-    updateCompareBar();
-    return true;
-}
-
-function updateCompareBar() {
-    let bar = document.getElementById('compare-bar');
-    if (!bar) {
-        bar = document.createElement('div');
-        bar.id = 'compare-bar';
-        bar.className = 'compare-bar';
-        document.body.appendChild(bar);
-    }
-    if (state.compareList.length === 0) {
-        bar.hidden = true;
-        return;
-    }
-    bar.hidden = false;
-    bar.innerHTML = `
-        <div class="compare-bar__items">
-            ${state.compareList.map(p => `
-                <div class="compare-bar__item">
-                    <span>${p.title.substring(0, 25)}${p.title.length > 25 ? '...' : ''}</span>
-                    <button onclick="removeFromCompare('${p.title.replace(/'/g, "\\'")}')">✕</button>
-                </div>
-            `).join('')}
-        </div>
-        <div class="compare-bar__actions">
-            <span class="compare-bar__count">${state.compareList.length}/3 selected</span>
-            <button class="compare-bar__btn" onclick="openComparePage()"
-                ${state.compareList.length < 2 ? 'disabled' : ''}>
-                Compare Now
-            </button>
-            <button class="compare-bar__clear" onclick="clearCompare()">Clear</button>
-        </div>
-    `;
-}
-
-function removeFromCompare(title) {
-    state.compareList = state.compareList.filter(p => p.title !== title);
-    document.querySelectorAll('.side-compare-checkbox').forEach(cb => {
-        if (cb.dataset.title === title) cb.checked = false;
-    });
-    updateCompareBar();
-}
-
-function clearCompare() {
-    state.compareList = [];
-    document.querySelectorAll('.side-compare-checkbox').forEach(cb => {
-        cb.checked = false;
-    });
-    updateCompareBar();
-}
-
-function openComparePage() {
-    if (state.compareList.length < 2) {
-        toast('Select at least 2 products to compare', 'info');
-        return;
-    }
-
-    let modal = document.getElementById('compare-modal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'compare-modal';
-        modal.className = 'modal-overlay';
-        document.body.appendChild(modal);
-    }
-
-    const products = state.compareList;
-
-    modal.innerHTML = `
-        <div class="modal" style="max-width:900px;width:95%;">
-            <button class="modal__close" onclick="document.getElementById('compare-modal').hidden=true">&times;</button>
-            <h2 class="modal__title">Product Comparison</h2>
-            <div style="overflow-x:auto;margin-top:16px;">
-                <table class="compare-table">
-                    <thead>
-                        <tr>
-                            <th style="min-width:120px;">Attribute</th>
-                            ${products.map(p => `
-                                <th style="min-width:180px;">${p.title}</th>
-                            `).join('')}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><strong>Category</strong></td>
-                            ${products.map(p => `<td>${p.category || 'N/A'}</td>`).join('')}
-                        </tr>
-                        <tr>
-                            <td><strong>Rating</strong></td>
-                            ${products.map(p => `<td>⭐ ${(p.rating || 0).toFixed(1)}</td>`).join('')}
-                        </tr>
-                        <tr>
-                            <td><strong>Sentiment</strong></td>
-                            ${products.map(p => {
-                                const s = p.avg_sentiment || 0;
-                                const label = s > 0.05 ? '😊 Positive' : s < -0.05 ? '😞 Negative' : '😐 Neutral';
-                                return `<td>${label}</td>`;
-                            }).join('')}
-                        </tr>
-                        <tr>
-                            <td><strong>Description</strong></td>
-                            ${products.map(p => `<td style="font-size:12px;">${(p.description || 'N/A').substring(0, 100)}...</td>`).join('')}
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `;
-
-    modal.hidden = false;
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal.hidden = true;
-    });
-}
+document.readyState === 'loading'
+  ? document.addEventListener('DOMContentLoaded', bootstrap)
+  : bootstrap();
