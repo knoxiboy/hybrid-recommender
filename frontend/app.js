@@ -1564,6 +1564,86 @@ els.productCount.textContent = `${visibleCount} products loaded`;
     }
 }
 
+async function loadSearchResults(query) {
+    els.productGrid.innerHTML = '';
+    els.skeletonLoader.hidden = false;
+    els.productsTitle.textContent = `Results for "${query}"`;
+
+    try {
+        const data = await API.get(`/api/search?q=${encodeURIComponent(query)}&limit=40`);
+        const products = data.results || [];
+        els.skeletonLoader.hidden = true;
+        els.productCount.textContent = `${products.length} results`;
+        state.products = [];
+        renderProducts(products, false);
+        els.productGrid.classList.remove('fade-in');
+
+        requestAnimationFrame(() => {
+        els.productGrid.classList.add('fade-in');
+        });
+        els.loadMoreContainer.hidden = true;
+    } catch {
+        els.skeletonLoader.hidden = true;
+        toast('Search failed', 'error');
+    }
+}
+
+function renderProducts(products, append) {
+    if (!append) state.products = [];
+
+    const fragment = document.createDocumentFragment();
+    const filteredProducts =
+    state.selectedCategory === 'All Categories'
+        ? products
+        : products.filter(
+            p => p.category === state.selectedCategory
+        );
+    filteredProducts.forEach((p, i) => {
+        state.products.push(p);
+        const card = document.createElement('div');
+        card.className = 'product-card';
+        card.style.animationDelay = `${i * 50}ms`;
+        card.innerHTML = `
+            <div class="product-card__image">
+                ${categoryIcon(p.category)}
+            </div>
+            <div class="product-card__body">
+                ${p.category ? `<span class="product-card__category">${p.category}</span>` : ''}
+                <h3 class="product-card__title">${p.title || 'Untitled'}</h3>
+                <p class="product-card__desc">${p.description || 'No description available.'}</p>
+                <div class="product-card__footer">
+                    <div class="product-card__rating">
+                        <div class="star-rating">${renderStars(p.rating || 0)}</div>
+                        <span class="rating-value">${(p.rating || 0).toFixed(1)}</span>
+                    </div>
+                    ${sentimentBadge(p.avg_sentiment || 0)}
+                </div>
+            </div>
+            <div class="product-card__actions">
+                <button class="btn--add-cart" data-title="${p.title}">
+                    Get Recommendations
+                </button>
+            </div>
+        `;
+
+        // Click → get recommendations
+        card.querySelector('.btn--add-cart').addEventListener('click', (e) => {
+            e.stopPropagation();
+            const title = e.target.dataset.title;
+            loadRecommendations(title);
+            toast(`Finding recommendations for "${title.substring(0, 40)}..."`, 'info');
+        });
+
+        card.addEventListener('click', () => {
+            loadRecommendations(p.title);
+        });
+
+        fragment.appendChild(card);
+    });
+
+    els.productGrid.appendChild(fragment);
+}
+
 // ── Recommendations ─────────────────────────────────────────────────
 async function loadRecommendations(title) {
     if (!state.modelReady) {
@@ -1572,6 +1652,11 @@ async function loadRecommendations(title) {
     }
 
     els.recsSection.hidden = false;
+    els.recsSection.classList.remove('slide-up');
+
+        requestAnimationFrame(() => {
+    els.recsSection.classList.add('slide-up');
+    });
     els.recsStrip.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:13px;">Loading recommendations...</div>';
 
     try {
