@@ -332,6 +332,7 @@ NDCG@K       —  ranking quality (discounted cumulative gain)
 ✓  Generic error messages — no stack trace leakage
 ✓  SQL injection safe (Supabase SDK parameterized queries)
 ```
+## 👥 Contributors
 
 ---
 ## 09 — FAQ

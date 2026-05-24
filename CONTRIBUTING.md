@@ -117,7 +117,16 @@ test: add unit tests for hybrid scoring logic
 6. Comment `"I'd like to work on this!"` and **wait to be assigned** before starting
 7. PRs submitted without prior assignment may be closed without review
 
----
+    [ ] I branched off a fresh main (not an old or stale branch)
+    [ ] My branch name follows the naming convention above
+    [ ] My commit messages follow the Conventional Commits format
+    [ ] I linked the issue with Closes #issue-number in the PR body
+    [ ] I filled in all PR template sections (What changed / Why / How to test)
+    [ ] I tested my changes locally end-to-end
+    [ ] No new PEP8 / flake8 errors (run: flake8 backend/ --max-line-length=79)
+    [ ] No unrelated files modified
+    [ ] No .env, pycache, node_modules, or .DS_Store committed
+    [ ] No console.log() left in production JS (use console.warn/error only)
 
 ## PR Submission Checklist
 
