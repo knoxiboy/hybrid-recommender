@@ -259,6 +259,7 @@ def _get_collab_recs(title: str, df: pd.DataFrame, svd_matrix, k: int) -> list[s
 
 def _get_sentiment_recs(title: str, df: pd.DataFrame, k: int) -> list[str]:
     """Return top-K titles sorted by VADER sentiment score (descending)."""
+    # Fixed indentation for evaluation workflow as requested
     try:
         idx = df[df["title"] == title].index[0]
     except IndexError:
