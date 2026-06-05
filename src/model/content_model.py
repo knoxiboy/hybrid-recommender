@@ -2,21 +2,30 @@
 Content-Based Recommender
 Uses SentenceTransformers to generate semantic embeddings of item metadata
 and cosine similarity to find similar items.
+
+Optimizations:
+- Implements chunked batch encoding to prevent Out-Of-Memory (OOM) memory overhead.
 """
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+# Optional HNSW support (enabled only if hnswlib is importable)
+try:
+    import hnswlib
+except Exception:
+    hnswlib = None
+
 
 class ContentRecommender:
-    def __init__(self, item_df, model_name='all-MiniLM-L6-v2'):
+    def __init__(self, item_df, model_name='all-MiniLM-L6-v2', batch_size=256):
         """
         item_df: DataFrame with at least 'title' and 'combined' columns.
         'combined' = title + description + category (created by data_adapter).
+        batch_size: Size of slices processed sequentially to prevent RAM spikes.
         """
         self.df = item_df.reset_index(drop=True)
-<<<<<<< HEAD:content_model.py
         self.vectorizer = TfidfVectorizer(
             stop_words='english',
             max_features=5000,
@@ -32,19 +41,9 @@ class ContentRecommender:
         # Do not compute full similarity matrix here to avoid OOM
         self._title_to_idx = {
             t.lower(): i for i, t in enumerate(self.df['title'].astype(str))
-=======
-        self.model = SentenceTransformer(model_name)
-        
-        # Generate embeddings for all items
-        texts = self.df['combined'].fillna('').tolist()
-        self.matrix = self.model.encode(texts, show_progress_bar=False)
-        
-        self._title_to_idx = {
-            t.lower(): i for i, t in enumerate(self.df['title'])
->>>>>>> main:src/model/content_model.py
         }
 
-    def recommend(self, title, top_n=10):
+    def recommend(self, title, top_n=10, target_catalog=None):
         """
         Get content-based recommendations for a given item title.
         Returns list of dicts: [{ 'title', 'content_score' }, ...]
@@ -52,43 +51,47 @@ class ContentRecommender:
         if title.lower() not in self._title_to_idx:
             return []
 
-<<<<<<< HEAD:content_model.py
-        title_key = title.lower()
-
-        if title_key not in self._title_to_idx:
-            return []
-
-        idx = self._title_to_idx[title_key]
-
-    
-        query_vec = self.matrix[idx]
-        scores = cosine_similarity(query_vec, self.matrix).flatten()
-
-        
-        scores[idx] = float("-inf")
-
-        top_indices = np.argsort(-scores)
-
-        results = []
-        seen = set() 
-        for i in top_indices+1:
-            t = str(self.df.iloc[i]["title"]).strip()
-            key = t.lower()
-            if key in seen:
-=======
         idx = self._title_to_idx[title.lower()]
         query_vec = self.matrix[idx].reshape(1, -1)
-        scores = cosine_similarity(query_vec, self.matrix).flatten()
-        
-        sim_scores = list(enumerate(scores))
-        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        # Candidate retrieval: use ANN for candidate selection if enabled,
+        # otherwise fall back to brute-force over the full matrix.
+        n = int(self.matrix.shape[0]) if getattr(self, 'matrix', None) is not None else 0
+        sim_scores = None
+        if getattr(self, '_ann_enabled', False) and self._ann_index is not None:
+            try:
+                q = query_vec[0] if query_vec.shape[0] == 1 else query_vec
+                k = min(n, max(top_n * 5, top_n)) if n > 0 else top_n
+                labels, dists = self._ann_index.knn_query(q, k=k)
+                # labels is expected to be 2D: take first row
+                candidate_idxs = labels[0].tolist() if hasattr(labels, '__len__') else list(labels)
+                candidate_idxs = [int(i) for i in candidate_idxs if 0 <= int(i) < n]
+                if candidate_idxs:
+                    candidate_matrix = self.matrix[candidate_idxs]
+                    # Recompute exact cosine similarity on ANN candidates to preserve
+                    # the original ranking and scoring semantics (ANN only for candidates).
+                    candidate_scores = cosine_similarity(query_vec, candidate_matrix).flatten()
+                    sim_scores = list(zip(candidate_idxs, candidate_scores))
+                    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+                else:
+                    # empty candidate set; fall back
+                    scores = cosine_similarity(query_vec, self.matrix).flatten()
+                    sim_scores = list(enumerate(scores))
+                    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+            except Exception:
+                # Any ANN failure -> fallback to brute-force
+                scores = cosine_similarity(query_vec, self.matrix).flatten()
+                sim_scores = list(enumerate(scores))
+                sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        else:
+            scores = cosine_similarity(query_vec, self.matrix).flatten()
+            sim_scores = list(enumerate(scores))
+            sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
         results = []
         seen = set()
         for i, score in sim_scores:
             t = self.df.iloc[i]['title']
             if t.lower() == title.lower() or t in seen:
->>>>>>> main:src/model/content_model.py
                 continue
             seen.add(key)
             
@@ -120,24 +123,58 @@ class ContentRecommender:
         
         return [{'term': 'semantic_similarity', 'score': round(float(score), 4)}]
 
-    def search(self, query, top_n=20):
+    def search(self, query, top_n=20, target_catalog=None):
         """
         Search items by query text using semantic similarity.
         Returns list of matching item titles with scores.
         """
         query_vec = self.model.encode([query])
-        scores = cosine_similarity(query_vec, self.matrix).flatten()
-        top_indices = np.argpartition(-scores, top_n)[:top_n]
-        top_indices = top_indices[np.argsort(-scores[top_indices])]
+
+        # Candidate retrieval: prefer ANN candidates when available, otherwise brute-force
+        n = int(self.matrix.shape[0]) if getattr(self, 'matrix', None) is not None else 0
+        sim_scores = None
+        if getattr(self, '_ann_enabled', False) and self._ann_index is not None:
+            try:
+                q = query_vec[0] if query_vec.shape[0] == 1 else query_vec
+                k = min(n, max(top_n * 5, top_n)) if n > 0 else top_n
+                labels, dists = self._ann_index.knn_query(q, k=k)
+                candidate_idxs = labels[0].tolist() if hasattr(labels, '__len__') else list(labels)
+                candidate_idxs = [int(i) for i in candidate_idxs if 0 <= int(i) < n]
+                if candidate_idxs:
+                    candidate_matrix = self.matrix[candidate_idxs]
+                    # Recompute exact cosine similarity on ANN candidates to preserve
+                    # the original ranking and scoring semantics (ANN only for candidates).
+                    candidate_scores = cosine_similarity(query_vec, candidate_matrix).flatten()
+                    sim_scores = list(zip(candidate_idxs, candidate_scores))
+                    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+                else:
+                    scores = cosine_similarity(query_vec, self.matrix).flatten()
+                    sim_scores = list(enumerate(scores))
+                    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+            except Exception:
+                scores = cosine_similarity(query_vec, self.matrix).flatten()
+                sim_scores = list(enumerate(scores))
+                sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        else:
+            scores = cosine_similarity(query_vec, self.matrix).flatten()
+            sim_scores = list(enumerate(scores))
+            sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
 
         results = []
         seen = set()
-        for idx in top_indices:
-            if scores[idx] <= 0:
+        for idx, score in sim_scores:
+            if score <= 0:
                 break
             t = self.df.iloc[idx]['title']
             if t in seen:
                 continue
+
+            # Catalog filtering
+            if target_catalog and 'catalog' in self.df.columns:
+                item_catalog = self.df.iloc[idx].get('catalog', '')
+                if str(item_catalog).lower() != str(target_catalog).lower():
+                    continue
+
             seen.add(t)
             
             tp = self.df.at[idx, 'top_reviews'] if 'top_reviews' in self.df.columns else []
@@ -145,10 +182,15 @@ class ContentRecommender:
 
             results.append({
                 'title': t,
-                'score': float(scores[idx]),
+                'score': float(score),
                 'item_id': str(self.df.iloc[idx].get('item_id', idx)),
                 'category': self.df.iloc[idx].get('category', ''),
                 'description': str(self.df.iloc[idx].get('description', ''))[:200],
                 'top_reviews': top_reviews,
             })
+
+            if len(results) >= top_n:
+                break
+
         return results
+
