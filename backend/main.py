@@ -523,7 +523,36 @@ def search_items(
         p['rank'] = 0.0
 
 
-    # Format response
+    def _product_price(product):
+        metadata = product.get('metadata') or {}
+    
+        raw_price = (
+            product.get('price')
+            if product.get('price') is not None
+            else metadata.get('price')
+        )
+    
+        try:
+            return float(raw_price or 0)
+    
+        except (TypeError, ValueError):
+            return 0.0
+    
+    
+    if sort == "price-low":
+        products = sorted(products, key=_product_price)
+    
+    elif sort == "price-high":
+        products = sorted(products, key=_product_price, reverse=True)
+    
+    elif sort == "rating":
+        products = sorted(
+            products,
+            key=lambda p: float(p.get('rating') or 0),
+            reverse=True
+        )
+    
+    
     results = []
     
     for p in products:
