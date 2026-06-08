@@ -7,6 +7,8 @@ Improvements:
 - Implicit feedback support (views, purchases → confidence weights)
 - Adaptive n_factors for sparse matrices
 - User-based personalized recommendations
+- [NEW] NeuMF (Neural Matrix Factorization) — two-tower ANN replacing SVD
+         Enable via USE_NEUMF=true in .env
 """
 __all__ = ["CollaborativeRecommender"]
 
@@ -31,19 +33,15 @@ class CollaborativeRecommender:
         """
         self.df = interaction_df.copy()
 
-        # Map users and items to integer indices
-        self.users = self.df['user_id'].astype('category')
+        self.users  = self.df['user_id'].astype('category')
         self.titles = self.df['title'].astype('category')
 
-        self._user_to_idx = {u: i for i, u in enumerate(self.users.cat.categories)}
+        self._user_to_idx  = {u: i for i, u in enumerate(self.users.cat.categories)}
         self._title_to_idx = {t: i for i, t in enumerate(self.titles.cat.categories)}
-        self.title_list = list(self.titles.cat.categories)
+        self.title_list    = list(self.titles.cat.categories)
 
-        # Build sparse user-item matrix
-        row = self.users.cat.codes.values
-        col = self.titles.cat.codes.values
-
-        # Combine explicit ratings with implicit signals
+        row  = self.users.cat.codes.values
+        col  = self.titles.cat.codes.values
         data = self.df['rating'].values.astype(float)
 
         if use_implicit:
@@ -61,7 +59,8 @@ class CollaborativeRecommender:
 
         # Adaptive rank: reduce factors dynamically for sparse matrices
         min_dim = min(self.user_item_sparse.shape)
-        density = self.user_item_sparse.nnz / (n_users * n_items) if (n_users * n_items) > 0 else 0
+        density = (self.user_item_sparse.nnz / (n_users * n_items)
+                   if (n_users * n_items) > 0 else 0)
 
         # FIX FOR ISSUE #483: Prevent array out-of-bounds collapse on small matrices
         if min_dim <= 2:
@@ -140,10 +139,7 @@ class CollaborativeRecommender:
                     continue
 
             seen.add(t)
-            results.append({
-                'title': t,
-                'collab_score': float(score),
-            })
+            results.append({'title': t, 'collab_score': float(score)})
             if len(results) >= top_n:
                 break
 

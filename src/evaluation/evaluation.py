@@ -1,11 +1,138 @@
+"""
+evaluation.py — Model Performance Benchmarking
+Computes Precision@K, Recall@K, and NDCG@K for four recommendation modes:
+  - content       (TF-IDF cosine similarity only)
+  - collaborative (Truncated SVD only)
+  - sentiment     (VADER sentiment only)
+  - hybrid        (weighted blend of all three)
+
+Usage as CLI (unchanged from original behaviour):
+    python evaluation.py
+    python evaluation.py --k 20
+    python evaluation.py --k 10 --mode hybrid
+
+Usage as importable module (new — used by /api/evaluate endpoint):
+    from evaluation import run_evaluation
+    results = run_evaluation(k=10, mode="all", weights={"alpha":0.4,"beta":0.4,"gamma":0.2})
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
 import os
 import numpy as np
 import pandas as pd
 from typing import Any, Dict, List, Set, Tuple
 
-# Type definitions for compatibility
-Mode = Any
-ResultsDict = Dict[str, Any]
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+Mode = Literal["content", "collaborative", "sentiment", "hybrid", "all"]
+
+MetricsDict = dict[str, float]          # {"precision": 0.4, "recall": 0.38, "ndcg": 0.51}
+ResultsDict = dict[str, MetricsDict]    # {"content": {...}, "hybrid": {...}, ...}
+UNSAFE_CACHE_SUFFIXES = {".pkl", ".pickle"}
+
+
+# ---------------------------------------------------------------------------
+# Core metric helpers with safety guards against ZeroDivisionError
+# ---------------------------------------------------------------------------
+
+def _precision_at_k(recommended: list, relevant: set, k: int) -> float:
+    """Fraction of top-K recommended items that are relevant."""
+    if not relevant or k == 0 or not recommended:
+        return 0.0
+    hits = sum(1 for item in recommended[:k] if item in relevant)
+    return hits / k
+
+def recall_at_k(rec, rel, k):
+    rec = rec[:k]
+    return len(set(rec) & set(rel)) / len(rel) if rel else 0.0
+
+def _recall_at_k(recommended: list, relevant: set, k: int) -> float:
+    """Fraction of relevant items found in top-K recommendations."""
+    if not relevant or k == 0 or not recommended:
+        return 0.0
+    hits = sum(1 for item in recommended[:k] if item in relevant)
+    
+    # FIX FOR ISSUE #486: Guard cold states to prevent ZeroDivisionError
+    denom = len(relevant)
+    return hits / denom if denom > 0 else 0.0
+
+
+def _dcg_at_k(recommended: list, relevant: set, k: int) -> float:
+    """Discounted Cumulative Gain at K."""
+    if not recommended or not relevant or k == 0:
+        return 0.0
+    dcg = 0.0
+    for i, item in enumerate(recommended[:k], start=1):
+        if item in relevant:
+            dcg += 1.0 / math.log2(i + 1)
+    return dcg
+
+
+def _ndcg_at_k(recommended: list, relevant: set, k: int) -> float:
+    """Normalised DCG at K (IDCG assumes all relevant items are at top)."""
+    dcg = _dcg_at_k(recommended, relevant, k)
+    ideal = _dcg_at_k(list(relevant)[:k], relevant, k)
+    
+    # FIX FOR ISSUE #486: Handle zero baseline ideal scores gracefully
+    return dcg / ideal if ideal > 0.0 else 0.0
+
+
+# Public wrappers used by benchmark.py
+def ndcg_at_k(recommended: list, relevant: set, k: int) -> float:
+    """Exported wrapper for normalized DCG."""
+    return _ndcg_at_k(recommended, relevant, k)
+
+
+def average_precision_at_k(recommended: list, relevant: set, k: int) -> float:
+    """Average Precision at K (AP@K).
+
+    Implemented as sum(precision@i * rel_i) / min(|relevant|, k).
+    """
+    if not relevant or k == 0 or not recommended:
+        return 0.0
+    hits = 0
+    precisions = 0.0
+    for i, item in enumerate(recommended[:k], start=1):
+        if item in relevant:
+            hits += 1
+            precisions += hits / i
+    denom = min(len(relevant), k)
+    return precisions / denom if denom > 0 else 0.0
+
+
+# New metrics requested: MRR, Hit Rate, Catalog Coverage, ILD
+def _mean_reciprocal_rank(recommended: list, relevant: set, k: int) -> float:
+    """Mean Reciprocal Rank (MRR) — rank of first relevant item."""
+    if not relevant or k == 0 or not recommended:
+        return 0.0
+    for i, item in enumerate(recommended[:k], start=1):
+        if item in relevant:
+            return 1.0 / i
+    return 0.0
+
+
+def _hit_rate(recommended: list, relevant: set, k: int) -> float:
+    """Hit Rate — 1.0 if at least one relevant item in top-K."""
+    if not relevant or k == 0 or not recommended:
+        return 0.0
+    return 1.0 if any(item in relevant for item in recommended[:k]) else 0.0
+
+
+def _catalog_coverage(all_recommendations: list[list], catalog_size: int) -> float:
+    """Catalog coverage: fraction of unique items recommended."""
+    if not all_recommendations or catalog_size == 0:
+        return 0.0
+    unique = set()
+    for recs in all_recommendations:
+        unique.update(recs)
+    return len(unique) / catalog_size
+
 
 def _load_or_build_svd(df: pd.DataFrame) -> np.ndarray:
     """Helper to mock or build an SVD matrix for collaborative filtering."""

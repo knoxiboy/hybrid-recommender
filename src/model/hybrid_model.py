@@ -395,7 +395,9 @@ class HybridRecommender:
         all_titles = {r['title'] for r in content_recs}
 
         # 2. Collaborative scores
+        
         collab_map = {}
+
         if self.collab_model:
             collab_recs = self.collab_model.recommend(title, top_n=top_n * 3, target_catalog=target_catalog)
             for r in collab_recs:
